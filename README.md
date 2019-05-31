@@ -17,6 +17,6 @@ https://github.com/akshaykher/Retail-Analysis-Impact-of-Mailer-and-In-Store-Disp
 1. Data Preparation
 2. Problem Formulation
 3. Data Analysis
-        (a) Data Exploration
-        (b) Shelf Optimization
+   * Data Exploration
+   * Shelf Optimization
 4. Summary & Future Work
