@@ -1,0 +1,1089 @@
+---
+title: "Shelf Optimization Analysis - Kroger"
+author: "Akshay Kher"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+   html_document:
+    code_folding: hide
+---
+
+# {.tabset .tabset-fade}
+
+## Introduction
+
+```{r, out.width = "400px", fig.align="center"}
+path_image <- "C:/Users/Akshay Kher/Desktop/Akshay Kher - Walmart Data Challenge/documents/" # image path
+knitr::include_graphics(paste0(path_image,'kroger_logo.png'))
+```
+
+***
+
+#### **Problem Description**
+
+For a particular **store** and **category**, what is the **right set of products** to carry with **limited shelf space**?
+
+***
+
+#### **Data**
+
+The data analyzed contains **household level transactions of over two years from a group of 2,500 households who are frequent shoppers at Kroger**. It contains all of each household's purchases, not just those from a limited number of categories. For certain households, demographic information as well as direct marketing contact history are included. For detailed information, please refer to the following pdf:
+
+https://github.com/akshaykher/Retail-Analysis-Impact-of-Mailer-and-In-Store-Display/blob/master/The_Complete_Journey_guide.pdf
+
+***
+
+#### **Steps**
+
+1. Data Preparation
+2. Problem Formulation
+3. Data Analysis
+    (a) Data Exploration
+    (b) Shelf Optimization
+4. Summary & Future Work
+
+## 1. Data Preparation
+
+**Libraries Required**
+
+Loading **Libraries**
+```{r warning=FALSE, message=FALSE}
+library(data.table) # package to read csv files
+library(tidyverse) # package to perform data manipulation
+library(kableExtra) # package to output HTML tables
+library(DT) # package to output HTML tables
+library(ggthemes) # package to change visualization themes
+library(treemapify) # package to draw treemaps
+library(cowplot) # package for stacking visuals side-by-side
+library(plotly) # package to plot interactive visuals
+library(arules) # package to implement apriori algorithm
+library(arulesViz) # package to visualize results from apriori algorithm
+library(stringr) # package to perform string manipulation
+```
+
+***
+
+**Reading Data**
+
+Reading **Transaction, Product and Demographic data**.
+```{r}
+path <- "C:/Users/Akshay Kher/Desktop/Akshay Kher - Walmart Data Challenge/data/" # data path
+
+transaction_data <- fread(paste0(path,"transaction_data.csv")) %>% as_data_frame() # transactional data
+product <- fread(paste0(path,"product.csv")) %>% as_data_frame() # product data
+hh_demographic <- fread(paste0(path,"hh_demographic.csv")) %>% as_data_frame() # demographic data
+```
+
+***
+
+**Aggregating Data**
+
+Aggregating **Transaction, Product and Demographic data**. Also, adding a new variable called **product_price**.
+
+```{r}
+# Left joining product and demographic data with transaction data. Also adding new variable called product_price.
+aggregated_data <-
+  transaction_data %>% 
+    left_join(hh_demographic, by="household_key") %>% 
+    left_join(product, by="product_id") %>% 
+  mutate(product_price = (sales_value - (retail_disc + coupon_match_disc))/quantity) %>% 
+  select(household_key:curr_size_of_product, product_price, everything())
+```
+
+***
+
+**Data Dictionary**
+
+```{r message = FALSE, warning = FALSE}
+text_tbl <- data.frame (
+  Variable = names(aggregated_data),
+  Description = c(
+    "Uniquely identifies each household",
+    "Uniquely identifies a pruchase occasion",
+    "Day when the transaction occurred",
+    "Uniquely identifies each product",
+    "Number of products purchased during the trip",
+    "Amount of dollars retailer receives from the sale",
+    "Uniquely identifies each store",
+    "Discount applied due to retailer's match",
+    "Time of the day when the transaction occurred",
+    "Week of the transaction. Ranges from 1-102",    
+    "Discount applied due to manufacturer coupon",
+    "Discount applied due to retailer's loyalty program",
+    "Estimated age range of customer",
+    "Marital Status of customer (A - Married, B - Single, U - Unknown)",
+    "Household Income of customer",
+    "Homeowner, renter, etc.",
+    "Household composition",
+    "Size of household up to 5+",
+    "Number of children present up to 3+",
+    "Manufacturer code",
+    "Groups similar products together (Category)",
+    "Indicates Private or National level brand",
+    "Groups similar products at a lower level",
+    "Groups similar products at the lowest level",
+    "Indicates package size (not available for all products)",
+    "Indicates price of product"
+ )
+)
+
+kable(text_tbl) %>%
+  kable_styling(full_width = F) %>%
+  column_spec(1, bold = T, border_right = T) %>%
+  column_spec(2, width = "30em")
+```
+
+***
+
+**First 100 rows**
+
+```{r}
+kable(head(arrange(aggregated_data, desc(age_desc)), 100)) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "100%", height = "500px")
+```
+
+***
+
+#### Overall
+
+* 2.6 million **transactions**
+* 102 **weeks**
+* 2,500 **households**
+* 582 **stores**
+* 44 **categories**
+* 2,383 **products**
+
+***
+
+#### Filtering Data
+
+For this analysis, we will consider only a **single store** (and it's competitors) and a **single category**. We will consider that store/category which has the maximum **transactions**.
+
+(A) **Store**
+
+* The plot depicts **top 30 stores by number of transactions**. 
+* Store **367** has the highest number of transactions.
+* Also, stores **406, 356, 381 & 292** have high number of transactions as well. Thus, we will consider these as competitors to store **367**. 
+* Now, we will limit our analysis to store **367** and it's four competitors.
+
+***Note**: Ideally, competitors should be compared on many factors like proximity, total revenue, total visits, total units sold etc. However, due to limited data, we will go ahead with our simplified assumption*.
+
+```{r message=FALSE, warning=FALSE}
+# aggregating transactions by store_id. Also, filtering for top 30 stores.
+filter_store <-
+  aggregated_data %>% 
+  group_by(store_id) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count)) %>% 
+  top_n(30) %>% 
+  mutate(store_id = as.character(store_id))
+
+# plotting visual
+ggplot(filter_store, aes(x=reorder(store_id, count), y=count)) +
+  geom_bar(stat='identity') +
+  coord_flip() +
+  theme_tufte() +
+  xlab("Store ID") +
+  ylab("")
+```
+
+***
+
+(B) **Category**
+
+* The plot depicts **top 10 categories by number of transactions**. 
+* Category **Grocery** has the highest number of transactions. Hence, we will limit our analysis to this category only.
+
+```{r message=FALSE, warning=FALSE}
+# aggregating transactions by category Also, filtering for top 10 categories.
+filter_category <-
+  aggregated_data %>% 
+  group_by(department) %>% 
+  summarise(transactions = n()) %>% 
+  arrange(desc(transactions)) %>% 
+  top_n(11) %>% 
+  filter(department != "") %>% 
+  select(category = department, transactions)
+
+ggplot(filter_category, aes(area = transactions, label = category)) +
+  geom_treemap() +
+  geom_treemap_text(fontface = "italic", colour = "orange", place = "centre",
+                    grow = TRUE)
+```
+
+***
+
+#### Cleaning Data
+
+In the previous step we filtered the data for **Stores 367, 406, 356, 381 & 292** and **Grocery category**. Now we will clean this data.
+
+**Converting data types:**
+
+* Age Description to factor
+* Marital Status to factor
+* Income Description to factor
+* Homeowner Description to factor
+* Homeowner Description to factor
+* Household Composition to factor
+* Size of Household to factor
+* Number of children to factor
+
+```{r}
+filtered_data <- 
+  aggregated_data %>% 
+  filter(store_id %in% c(367, 406, 356, 381, 292), department == "GROCERY") %>% 
+    mutate(age_desc = as.factor(age_desc),
+           marital_status_code = as.factor(marital_status_code),
+           income_desc = as.factor(income_desc),
+           homeowner_desc = as.factor(homeowner_desc),
+           hh_comp_desc = as.factor(hh_comp_desc),
+           household_size_desc = as.factor(household_size_desc),
+           kid_category_desc = as.factor(kid_category_desc),
+         brand = as.factor(brand))
+
+glimpse(filtered_data)
+```
+
+***
+
+**Missing Values**
+
+* **Demographic information** like Age Description, Marital Status, Income Description etc. have a lot of missing values. However, the customers might have chosen not to share this information. Thus, we will leave them as missing.
+* Transactions corresponding to missing **Product Price** have zero units bought and zero spend. These transactions seem erroneous, hence we will remove them.
+
+```{r warning=FALSE, message=FALSE}
+# calculate missing values
+na_table <-
+  map_dbl(filtered_data, function(x) sum(is.na(x))) %>%
+  sort(decreasing = TRUE) %>%
+  data.frame()
+
+# rename column
+colnames(na_table) <- c("total_missing")
+
+# display missing value table
+kable(na_table) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = F, position='left')
+```
+
+***
+
+After **removing missing product price transactions**, the new missing value table looks like:
+```{r warning=FALSE, message=FALSE}
+# removing missing product price transactions
+filtered_data <-
+  filtered_data %>% 
+    filter(!is.na(product_price))
+
+# calculate missing values
+na_table <-
+  map_dbl(filtered_data, function(x) sum(is.na(x))) %>%
+  sort(decreasing = TRUE) %>%
+  data.frame()
+
+# rename column
+colnames(na_table) <- c("total_missing")
+
+# display missing value table
+kable(na_table) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = F, position='left')
+```
+
+***
+
+**Outlier Analysis**
+
+Observations from **summary table**:
+
+* **Zero Quantity** seems erroneous. We will remove transactions with zero quantity bought.
+* **Zero Sales Value** is possible when the customer gets 100% discount. However, we will remove those transactions where sum of sales and discount is zero.
+* **Product Price** is coming as Inf due to division by zero quantity values. Once, we remove zero quantity values, this error should be fixed.
+
+```{r}
+# summary statistics for numerical variables
+summary <- data.frame()
+for(i in c(5,6,8,11,12,26))
+{
+  name = colnames(filtered_data)[i]
+  min = min(filtered_data[,i], na.rm=TRUE) %>% round(2)
+  percentile_1st = quantile(filtered_data[,i,drop=TRUE], probs = 0.01, na.rm = TRUE) %>% round(2) %>% as.numeric()
+  mean = mean(filtered_data[,i,drop=TRUE], na.rm=TRUE) %>% round(2)
+  median = median(filtered_data[,i,drop=TRUE], na.rm=TRUE) %>% round(2)
+  percentile_99th = quantile(filtered_data[,i,drop=TRUE], probs = 0.99, na.rm = TRUE) %>% round(2) %>% as.numeric()
+  max = max(filtered_data[,i], na.rm=TRUE) %>% round(2)
+  count = sum(!is.na(filtered_data[,i]))
+  df = data.frame(name, min, percentile_1st, mean=mean, median=median, percentile_99th, max, count)
+  summary <- rbind(summary, df)
+}
+
+# printing data
+kable(summary) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = F, position='left')
+```
+
+***
+
+After making the requisite changes, the summary table looks like:
+
+```{r}
+# quantity >0, spend >0
+filtered_data <-
+  filtered_data %>% 
+  filter(quantity !=0, (sales_value+retail_disc+coupon_disc+coupon_match_disc) !=0)
+
+# summary statistics for numerical variables
+summary <- data.frame()
+for(i in c(5,6,8,11,12,26))
+{
+  name = colnames(filtered_data)[i]
+  min = min(filtered_data[,i], na.rm=TRUE) %>% round(2)
+  percentile_1st = quantile(filtered_data[,i,drop=TRUE], probs = 0.01, na.rm = TRUE) %>% round(2) %>% as.numeric()
+  mean = mean(filtered_data[,i,drop=TRUE], na.rm=TRUE) %>% round(2)
+  median = median(filtered_data[,i,drop=TRUE], na.rm=TRUE) %>% round(2)
+  percentile_99th = quantile(filtered_data[,i,drop=TRUE], probs = 0.99, na.rm = TRUE) %>% round(2) %>% as.numeric()
+  max = max(filtered_data[,i], na.rm=TRUE) %>% round(2)
+  count = sum(!is.na(filtered_data[,i]))
+  df = data.frame(name, min, percentile_1st, mean=mean, median=median, percentile_99th, max, count)
+  summary <- rbind(summary, df)
+}
+
+# printing data
+kable(summary) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = F, position='left')
+```
+
+## 2. Problem Formulation
+
+#### Problem
+
+The retail manager of **Store 367** wants to understand the **right set of products (out of 610)** that should be carried in the **shelves** pertaining to the **Grocery Category**. For our analysis we have **102 weeks of data** from **245 households** who have made a total of **5720 transactions** in the **Grocery Category**.
+
+***
+
+#### Optimization Metrics
+
+I believe the solution highly depends upon the definition of **"right set of products"**. This definition will vary from store to store and location to location. Thus, it is important to define metrics that can help us identify the same:
+
+1. **Popular Products**: The retailer might want to include products that are popular among the customers in terms of revenue or visits.
+2. **Cross-Selling Products**: The retailer might want to include products that are bought in association with the popular products.
+3. **Branded Products**: The retailer might want to keep only high-end branded products.
+4. **Differentiated Products**: The retailer might want to keep products that differentiate it from it's competitors. 
+5. **Variety of Products**: The retailer might want to include variety of products.
+6. **Niche Products**: The retailer might want to include some niche products for a distinct set of customers.
+7. **Economic Products**: The retailer would want to include economic products for price sensitive customers.
+8. **Non-Perishable Products**: The retailer might want to have a more of non-perishable products to reduce risk of spoilage.
+9. **Speciality Products**: The retailer might want to include some special type of products. Ex: Homemade, Organic, Gluton Free, Egg Free etc.
+10. **Local Country Products**: The retailer might want to keep products that appeal to the local audience.
+11. **Weather Specific Products**: The retailer might want to stock items depending upon the weather conditions on that particular day. 
+12. **Festival Specific Products**: The retailer might want to include products depending on the upcoming festival.
+13. **Proximity Related Products**: The retailer might want to keep specific products depending upon its surroundings. Ex: Keeping university merchandise as it's closer to a university.
+14. **Promotional Products**: The retailer might want to stock products which generally have an offer from the manufacturer's side.
+15. **Easy to Carry/Transport Products**: The retailers might want to keep products that can be easily transported from the warehouse to the store.
+
+
+## 3. Data Analysis {.tabset .tabset-fade .tabset-pills}
+
+### Data Exploration
+
+#### 1. Product Popularity Comparison
+
+The treemap below visualizes top 10 products by revenue for two stores. The **size of the rectangle denotes the total revenue** and the **color denotes the total visits**. Some keys observations are as follows:
+
+* Following products provide high revenue for both stores:
+    * Beeralemalt Liquor 
+    * Milk
+    * Soft Drinks
+    * Shredded Cheese
+    * Juice 
+    * Toilet Tissue
+* For store **367, Yogurt seems to sell most units** whereas for store **292, milk seems to sell most units**
+* **Store 292** has a sizeable revenue generated from **Kids Cereals**. Further, **Milk** has the highest amount of units sold. This might indicate a **higher proportion of young couples with children** around the store.
+* On the contrary, customers in **Store 367** seem to spend highly on **Wine**. This might indicate that customers have a **sizeable disposable income**.
+* The **demographic profiles** for the two stores seem different, which we will explore later.
+
+```{r message=FALSE, warning=FALSE, fig.width=10}
+
+# Product Popularity Treemap for store 367
+p1 <-
+filtered_data %>% 
+  group_by(store_id, sub_commodity_desc) %>% 
+  summarise(revenue = sum(sales_value),
+            quantity = sum(quantity),
+            visits = n_distinct(basket_id)) %>% 
+  arrange(desc(revenue)) %>% 
+  filter(store_id == 367) %>% 
+  top_n(10, wt = revenue) %>% 
+  select(product = sub_commodity_desc, everything()) %>% 
+  ggplot(aes(area = revenue, label = product, fill=quantity)) +
+    geom_treemap() +
+    geom_treemap_text(fontface = "italic", 
+                      colour = "white", place = "centre", grow = TRUE) +
+  ggtitle("Store 367")
+
+# Product Popularity Treemap for store 292
+p2 <-
+filtered_data %>% 
+  group_by(store_id, sub_commodity_desc) %>% 
+  summarise(revenue = sum(sales_value),
+            quantity = sum(quantity),
+            visits = n_distinct(basket_id)) %>% 
+  arrange(desc(revenue)) %>% 
+  filter(store_id == 292) %>% 
+  top_n(10, wt = revenue) %>% 
+  select(product = sub_commodity_desc, everything()) %>% 
+  ggplot(aes(area = revenue, label = product, fill=quantity)) +
+  geom_treemap() +
+  geom_treemap_text(fontface = "italic", 
+                    colour = "white", place = "centre", grow = TRUE) +
+  ggtitle("Store 292")
+
+plot_grid(p1, p2, nrow = 2)
+```
+
+***
+
+#### 2. Product Price Comparison
+
+The bargraph compares the **prices of products** amongst the two stores. It is quite evident, that the prices of products in **store 367** are higher than that of **store 292** i.e. store 367's customer are willing to pay higher for the same products. This might indicate that they are **less influenced by the price of the product**.
+
+```{r}
+# Product Price Comparison Visual
+filtered_data %>% 
+group_by(store_id, sub_commodity_desc) %>% 
+summarise(revenue = sum(sales_value),
+          quantity = sum(quantity),
+          visits = n_distinct(basket_id),
+          price = median(product_price)) %>% 
+filter(store_id %in% c(367, 292),
+       sub_commodity_desc %in% c('BEERALEMALT LIQUORS',
+                                 'POPULAR 750ML WINES',
+                                 'KIDS CEREAL',
+                                 'SOFT DRINKS 12/18&15PK CAN CAR',
+                                 'FRZN SS PREMIUM ENTREES/DNRS/N',
+                                 'DAIRY CASE 100% PURE JUICE - O',
+                                 'TOILET TISSUE',
+                                 'SHREDDED CHEESE',
+                                 'YOGURT NOT MULTI-PACKS',
+                                 'POTATO CHIPS')) %>% 
+  select(store_id, sub_commodity_desc, price) %>% 
+  ggplot(aes(reorder(sub_commodity_desc, price), price)) +
+  geom_bar(stat = "identity", aes(fill = as.factor(store_id)), position = "dodge") +
+  scale_fill_manual(values=c("#999999", "#E69F00")) +
+  ylab("Price") +
+  xlab(" ") +
+  labs(fill="Store") +
+  theme_tufte() +
+  coord_flip()
+```
+
+***
+
+#### 3. Product Variety Comparison
+
+Store **367** seems to have a wider variety of Grocery products as compared to it's competitors.
+
+```{r}
+# Product Variety Comparison barplot
+filtered_data %>% 
+  group_by(store_id) %>% 
+  summarise(products = n_distinct(sub_commodity_desc)) %>% 
+  arrange(desc(products)) %>% 
+  ggplot(aes(reorder(store_id, -products), products)) +
+  geom_bar(stat = "identity", aes(fill = as.factor(store_id)), position = "dodge") +
+  ylab("Products") +
+  xlab("Store") +
+  theme_tufte() +
+  theme(legend.position="none") +
+  scale_fill_brewer(palette="Set1")
+```
+
+***
+
+#### 4. Transactions by day and hour
+
+* Most of the Grocery shoppers visit Store **367** on weekends. However, for Store **292** Monday seems to be the busiest day. This might indicate that a higher proportion of Grocery Shoppers for Store **367** are office going and they get time for Grocery Shopping only on weekends.
+* It seems that Store **292** is closed between 1-6 am whereas Store **367** is open 24x7.
+* **Thursday and Friday** seems to have a low footfall for both stores. Probably customers like Grocery Shopping either at the start of the week or at the end.
+* It would be interesting to **analyze all the of the customers** for both the stores to make more meaningful conclusions.
+
+
+```{r message=FALSE, warning=FALSE,, fig.width=10, fig.height=7}
+####### List of All Day and Time combinations ########
+df_mapping <- data.frame(day=3:711, day_of_week = c(rep(1:7, 101), c(1,2)))
+
+df <-
+  filtered_data %>%
+  mutate(time = as.factor(
+    substr(stringr::str_pad(
+      trans_time, width=4, side="left", pad="0"),1,2))) %>%
+  group_by(day, time) %>%
+  summarise(transactions = n()) %>%
+  inner_join(df_mapping, by="day") %>%
+  group_by(day_of_week, time) %>%
+  summarise(transactions = sum(transactions)/n())
+
+df$day <- as.factor(df$day_of_week)
+levels(df$day) <- c(4,5,6,7,1,2,3)
+levels(df$day) <- c("Friday", "Saturday", "Sunday","Monday", "Tuesday", "Wednesday", "Thursday")
+df$day <-
+  factor(as.factor(df$day), levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+
+df_mapping1 <- distinct(select(df, day, time))
+
+####### Heatmap for Store 367 ########
+
+df <- 
+  filtered_data %>% 
+  filter(store_id ==367) %>% 
+  mutate(time = as.factor(
+    substr(stringr::str_pad(
+      trans_time, width=4, side="left", pad="0"),1,2))) %>% 
+  group_by(day, time) %>% 
+  summarise(transactions = n()) %>% 
+  inner_join(df_mapping, by="day") %>% 
+  group_by(day_of_week, time) %>% 
+  summarise(transactions = sum(transactions)/n()) 
+
+df$day <- as.factor(df$day_of_week)
+levels(df$day) <- c(4,5,6,7,1,2,3)
+levels(df$day) <- c("Friday", "Saturday", "Sunday","Monday", "Tuesday", "Wednesday", "Thursday")
+df$day <-
+  factor(as.factor(df$day), levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+
+df <-
+  df %>% 
+  right_join(df_mapping1, by=c('day', 'time', 'day_of_week')) %>% 
+  mutate(transactions = replace_na(transactions,0))
+
+p3 <-
+df %>% 
+  ggplot(aes(day, time)) + 
+  geom_tile(aes(fill = transactions),colour = "white") + 
+  scale_fill_gradient(low = "white",high = "red") +
+  theme_tufte() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_blank()) +
+  labs(fill="Avg Transactions") +
+  ggtitle("Store 367") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+####### Heatmap for Store 367 ########
+
+df <- 
+  filtered_data %>% 
+  filter(store_id ==292) %>% 
+  mutate(time = as.factor(
+    substr(stringr::str_pad(
+      trans_time, width=4, side="left", pad="0"),1,2))) %>% 
+  group_by(day, time) %>% 
+  summarise(transactions = n()) %>% 
+  inner_join(df_mapping, by="day") %>% 
+  group_by(day_of_week, time) %>% 
+  summarise(transactions = sum(transactions)/n()) 
+
+df$day <- as.factor(df$day_of_week)
+levels(df$day) <- c(4,5,6,7,1,2,3)
+levels(df$day) <- c("Friday", "Saturday", "Sunday","Monday", "Tuesday", "Wednesday", "Thursday")
+df$day <-
+  factor(as.factor(df$day), levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+
+df <-
+  df %>% 
+  right_join(df_mapping1, by=c('day', 'time', 'day_of_week')) %>% 
+  mutate(transactions = replace_na(transactions,0))
+
+p4 <-
+df %>% 
+  ggplot(aes(day, time)) + 
+  geom_tile(aes(fill = transactions),colour = "white") + 
+  scale_fill_gradient(low = "white",high = "red") +
+  theme_tufte() +
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_blank()) +
+  labs(fill="Avg Transactions") +
+  ggtitle("Store 292") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+####
+
+plot_grid(p3, p4, nrow = 2)
+```
+
+***
+
+#### 5. Transactions by Week
+
+Clearly, the total number of transactions vary week-on-week for both stores. It would be interesting to identify the trends that affect this variation. Some of the reasons might be:
+
+(a) Festivals
+(b) Big Promotional Events
+(c) Holiday Seasons
+(d) Bad Weather (so people would want to stock up their inventory)
+(e) End of month (people get their salaries and thus purchase groceries)
+
+```{r}
+# Transactions by Week Line chart
+filtered_data %>% 
+  mutate(store_id = as.factor(store_id)) %>%
+  filter(store_id %in% c(367, 292)) %>% 
+  group_by(store_id, week_no) %>% 
+  summarise(transactions = n()) %>% 
+  ggplot(aes(x=week_no, y=transactions, group=store_id, color=store_id)) +
+  geom_point() +
+  geom_line() +
+  xlab("Week No") +
+  ylab("Transactions") +
+  labs(color="Store ID") +
+  theme_tufte()
+```
+
+***
+
+#### 6. Demographic Analysis
+
+**(A) Marital Distribution**
+
+Store **356** has a **large proportion of married Grocery Shoppers**. For all the other stores, the proportion seems reasonably similar.
+
+```{r}
+# filtering data
+df <-
+  filtered_data %>% 
+    distinct(household_key,
+             store_id,
+             age_desc,
+             marital_status_code,
+             income_desc,
+             homeowner_desc,
+             hh_comp_desc,
+             household_size_desc,
+             kid_category_desc) %>%
+    na.omit()
+
+# reordering levels
+df$store_id <- factor(as.factor(df$store_id), levels = c(356,406,292,367,381))
+levels(df$marital_status_code) <- c("Married", "Unmarried", "U")
+
+# Age Distribution Visual
+df %>% 
+  group_by(store_id, marital_status_code) %>% 
+  summarise(count = n()) %>% 
+  mutate(freq = count/sum(count)) %>% 
+  filter(marital_status_code !="U") %>% 
+  ggplot(aes(marital_status_code, freq)) +
+  geom_bar(stat = "identity", aes(fill = as.factor(store_id)), position = "dodge") +
+  scale_fill_brewer(palette="Set1") +
+  ylab("Proportion") +
+  xlab("") +
+  labs(fill="Store ID") +
+  theme_tufte()
+```
+
+***
+
+**(B) Income Distribution**
+
+Store **367** has customers with higher income as compared to customers from Store **292**. This observations is consistent with our previous observation that customers in store **367** are less price sensitive.
+
+```{r fig.width=10}
+# reordering levels
+df$income_desc <- factor(as.factor(df$income_desc), 
+                         levels = c("Under 15K","15-24K","25-34K","35-49K","50-74K",
+                                    "75-99K","100-124K","125-149K","150-174K","175-199K"
+                                    ,"200-249K","250K+"))
+
+# Income Distribution Visual
+df %>% 
+  group_by(store_id, income_desc) %>% 
+  filter(store_id %in% c(292, 367)) %>% 
+  summarise(count = n()) %>% 
+  mutate(freq = count/sum(count)) %>% 
+  ggplot(aes(income_desc, freq)) +
+  geom_bar(stat = "identity", aes(fill = as.factor(store_id)), position = "dodge") +
+  scale_fill_brewer(palette="Set1") +
+  ylab("Proportion") +
+  xlab("") +
+  labs(fill="Store ID") +
+  theme_tufte()
+```
+
+***
+
+**(C) No. of Children Distribution**
+
+Customer from Store **292** have higher number of children as compared to Store **367**. This explains why **Kids Cereal** is a top selling product for Store **292**.
+
+```{r}
+df$kid_category_desc <- factor(as.factor(df$kid_category_desc), 
+                         levels = c("None/Unknown","1","2","3+"))
+
+levels(df$kid_category_desc) <- c("0","1","2","3+")
+
+
+df %>% 
+  group_by(store_id, kid_category_desc) %>% 
+  filter(store_id %in% c(292, 367)) %>%
+  summarise(count = n()) %>% 
+  mutate(freq = count/sum(count)) %>% 
+  ggplot(aes(kid_category_desc, freq)) +
+  geom_bar(stat = "identity", aes(fill = as.factor(store_id)), position = "dodge") +
+  scale_fill_brewer(palette="Set1") +
+  ylab("Proportion") +
+  xlab("") +
+  labs(fill="Store ID") +
+  theme_tufte()
+```
+
+***
+
+**(D) Age Distribution**
+
+Age distribution for both the stores seems reasonably similar.
+
+```{r}
+df %>% 
+  group_by(store_id, age_desc) %>% 
+  filter(store_id %in% c(292, 367)) %>%
+  summarise(count = n()) %>% 
+  mutate(freq = count/sum(count)) %>% 
+  ggplot(aes(age_desc, freq)) +
+  geom_bar(stat = "identity", aes(fill = as.factor(store_id)), position = "dodge") +
+  scale_fill_brewer(palette="Set1") +
+  ylab("Proportion") +
+  xlab("") +
+  labs(fill="Store ID") +
+  theme_tufte()
+```
+
+
+### Shelf Optimization
+
+
+#### 1. Products with High Revenue
+
+A retailer would ideally want to stock those products that bring **high revenue**. In the visual we can see that approximately **250 products bring 90% of the revenue**. Hence, I would advise the retail manager of **Store 367** to include these **250 products** in the **Grocery Shelf**.
+
+*Hover over the visual for interaction*
+
+```{r}
+# initializing empty dataframe
+df <- data.frame()
+
+# loop to capture proportion of revenue for top n products
+for(n in seq(10,600,10))
+{
+  top_n_revenue <-
+    filtered_data %>% 
+    group_by(store_id, sub_commodity_desc) %>% 
+    summarise(revenue = sum(sales_value),
+              quantity = sum(quantity),
+              visits = n_distinct(basket_id)) %>% 
+    arrange(desc(revenue)) %>% 
+    filter(store_id == 367) %>% 
+    top_n(n, wt = revenue) %>% 
+    select(product = sub_commodity_desc, everything()) %>% 
+    summarise(tot_revenue = sum(revenue)) %>% .$tot_revenue
+  
+  total_revenue <- sum(filter(filtered_data, store_id == 367) %>% .$sales_value)
+  
+  # print(top_n_revenue/total_revenue)
+  
+  df[n/10, 1] = n
+  df[n/10, 2] = top_n_revenue/total_revenue
+}
+
+# renameing dataframe
+names(df) <- c("top_n_products", "percentage_revenue")
+df$percentage_revenue <- round(df$percentage_revenue, 2)
+
+# plotting elbow plot
+p1 <-
+ggplot(df, aes(x=top_n_products, y=percentage_revenue)) +
+  geom_point(color = "red", size=1) +
+  geom_line() +
+  scale_x_continuous(breaks = round(seq(0, 
+                                        max(df$top_n_products), by = 50),1)) +
+  scale_y_continuous(breaks = round(seq(0, 1, by = 0.1),1), limits = c(0,1),
+                     labels = scales::percent) +
+  theme_tufte() +
+  xlab("Total Products") +
+  ylab("% Revenue")
+
+# converting to interactive visual
+ggplotly(p1)
+```
+
+***
+
+**List of 250 Products Selected:**
+
+```{r}
+df_top_250 <-
+  filtered_data %>% 
+  group_by(store_id, sub_commodity_desc) %>% 
+  summarise(revenue = sum(sales_value),
+            quantity = sum(quantity),
+            visits = n_distinct(basket_id)) %>% 
+  arrange(desc(revenue)) %>% 
+  filter(store_id == 367) %>% 
+  top_n(250, wt = revenue) %>% 
+  ungroup() %>% 
+  select(Products = sub_commodity_desc)
+
+kable(df_top_250) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "50%", height = "500px")
+```
+
+***
+
+#### 2. Cross-Selling Products
+
+We have already selected a **set of 250 products that bring 90% of the revenue**. However, there might be products that don't bring high revenue, but are **frequently bought with these 250 products**.
+
+We would use the **Apriori Algorithm** to identify these **cross-selling products**. To implement the Apriori Algorithm, we first need to summarise our data at the **Basket Level** where **each row represents a basket** and **each column represents whether the respective product was bought (1) or not (0)**. 
+
+The top 100 rows are as follows:
+
+```{r}
+# converting to sparse format
+df <-
+  filtered_data %>% 
+  filter(store_id == 367) %>% 
+  select(basket_id, sub_commodity_desc) %>% 
+  mutate(transaction = 1) %>% 
+  unique() %>% 
+  spread(sub_commodity_desc, transaction) %>% 
+  replace(is.na(.), 0)
+
+kable(head(df, 100)) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "100%", height = "500px")
+```
+
+***
+
+**Running Apriori Algorithm to determine cross-selling products**
+
+* **Support**: The support of an itemset X is defined as the proportion of transactions in the data set which contain the itemset. 
+
+* **Confidence**: The confidence of a rule is defined as conf(X->Y)=supp(XUY)/supp(X). For example, the rule {milk, bread} -> {butter} has a confidence of 0.5, which means that for 50% of the transactions containing milk and bread the rule is correct. Confidence can be interpreted as an estimate of the conditional probability P(Y |X), the probability of finding the RHS of the rule in transactions under the condition that these transactions also contain the LHS. Association rules are required to satisfy both a minimum support and a minimum confidence constraint at the same time.
+
+* **Lift**: Lift is a popular measure of to filter or rank found rules. The lift of a rule is defined as lift(X->Y)=supp(XUY)/(supp(X)*supp(Y)). Lift can be interpreted as the deviation of the support of the whole rule from the support expected under independence given the supports of the LHS and the RHS. Greater lift values indicate stronger associations.
+
+The **Apriori Algorithm** identifies a set of 14,671 association rules.
+
+```{r}
+# converting to sparse format
+df <-
+  filtered_data %>% 
+  filter(store_id == 367) %>% 
+  select(basket_id, sub_commodity_desc) %>% 
+  mutate(transaction = 1) %>% 
+  unique() %>% 
+  spread(sub_commodity_desc, transaction) %>% 
+  replace(is.na(.), 0) %>% 
+  select(-basket_id)
+
+# converting to arules format
+transactions <- as(as.matrix(df), "transactions")
+
+# Run the apriori algorithm
+basket_rules <- 
+  apriori(transactions,parameter = list(sup = 0.002, conf = 0.5, target="rules"))
+```
+
+***
+
+I have kept only those association rules that contain the **popular products either on the lhs or the rhs** because we want to see the **association between the popular and the non-popular products only**. Using this filtering condition, we are left with **60 association rules**.
+
+```{r}
+# top 250 products by revenue
+df <-
+  filtered_data %>% 
+  group_by(store_id, sub_commodity_desc) %>% 
+  summarise(revenue = sum(sales_value),
+            quantity = sum(quantity),
+            visits = n_distinct(basket_id)) %>% 
+  arrange(desc(revenue)) %>% 
+  filter(store_id == 367) %>% 
+  top_n(250, wt = revenue) %>% 
+  ungroup() %>% 
+  select(Products = sub_commodity_desc)
+
+# association rules that contain the popular products either on the lhs or the rhs
+cross_selling_rules <- subset(basket_rules, subset = (lhs %in% df$Products & (!(rhs %in% df$Products))) |
+                          (rhs %in% df$Products & (!(lhs %in% df$Products))) &lift>1)
+
+# converting association rules into dataframe
+ruledf = data.frame(
+  lhs = labels(lhs(cross_selling_rules)),
+  rhs = labels(rhs(cross_selling_rules)), 
+  cross_selling_rules@quality)
+
+# printing dataframe
+kable(ruledf) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "100%", height = "500px")
+```
+
+***
+
+The following plot shows the **support and confidence for each of the 60 association rules**.
+
+```{r warning=FALSE, message=FALSE}
+# plotting visual
+plot(cross_selling_rules)
+```
+
+***
+
+The following plot shows the **association direction between 2 random rules**.
+
+```{r warning=FALSE, message=FALSE}
+# plotting visual
+plot(head(sort(cross_selling_rules, by="lift"), 2), method = "graph")
+```
+
+***
+
+Final list of **44 cross-selling products**
+
+*After including these 44 products, we have selected a total of 294 products from a set of 610 products till now*
+
+```{r}
+# combining lhs and rhs products
+prods <- unique(c(as.character(ruledf$lhs), as.character(ruledf$rhs)))
+index <- which(str_detect(prods, ","))
+prods <- prods[-index]
+
+# removing brackets 
+prods <- gsub("\\{", "", prods)
+prods <- gsub("\\}", "", prods)
+
+# removing popular products from the list of cross-selling products
+index <- which(prods %in% df$Products)
+index <- which(prods %in% df$Products)
+prods <- as.data.frame(prods[-index])
+names(prods) <- "Products"
+
+# printing cross-selling products
+kable(prods) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "50%", height = "500px")
+```
+
+***
+
+#### 3. Differentiated Products
+
+Differentiated products are those products which are sold in Store **367** but not in competitor stores. The Final list of **24 differentiated products** is shown below:
+
+*After including these 24 products, we have selected a total of 318 products from a set of 610 products till now*
+
+```{r}
+# Unique Products in Store 367
+products_367 <-
+filtered_data %>% 
+  filter(store_id == 367) %>% 
+  select(sub_commodity_desc) %>%
+  unique() %>% 
+  .$sub_commodity_desc
+
+# Unique Products in Stores except 367
+products_not_367 <-
+  filtered_data %>% 
+  filter(store_id != 367) %>% 
+  select(sub_commodity_desc) %>%
+  unique() %>% 
+  .$sub_commodity_desc
+
+# Products in Store 367 that are not in other stores
+df <- data.frame(Products = products_367[which(!products_367 %in% products_not_367)])
+
+# Final list of cross-selling products
+final_prods <- c(df_top_250$Products, as.character(prods$Products), as.character(df$Products))
+final_prods <- unique(final_prods)
+
+# Printing dataframe
+kable(df) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "50%", height = "500px")
+```
+
+***
+
+#### 4. High-End Products
+
+High-End Products are those products which are sold at a high price. As the customers in **Store 367** are less price sensitive, the likelihood of them buying these products is higher. The final list of **13 high-end products** is shown below:
+
+*After including these 13 products, we have selected a total of 331 products from a set of 610 products till now*
+```{r}
+# Top 13 products by price
+df <-
+filtered_data %>% 
+  filter(store_id == 367) %>% 
+  group_by(sub_commodity_desc) %>% 
+  summarise(price = median(product_price)) %>%
+  arrange(desc(price)) %>% 
+  top_n(50, price) %>% 
+  filter(!sub_commodity_desc %in% final_prods) %>% 
+  select(Products = sub_commodity_desc)
+
+# Final list of cross-selling products
+final_prods <- c(final_prods, df$Products)
+
+# Printing dataframe
+kable(df) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "50%", height = "500px")
+```
+
+## 4. Summary & Future Work
+
+#### Summary
+
+* We analyzed data containing **household level transactions of over two years from a group of 2,500 households** who are frequent shoppers at Kroger.
+* We limited our analysis to customers from **Store 367** and it's competitors buying in **Grocery Category**.
+* Now, the **retail manager of Store 367** wants to understand the **right set of products that should be carried** in the **Grocery Shelf**. We defined a few metrics that could measure the same:
+    * Popular Products
+    * Cross-Selling Products
+    * Branded Products
+    * Differentiated Products
+    * Variety of Products
+    * Niche Products
+    * Economic Products
+    * Non-Perishable Products
+    * Speciality Products
+    * Local Country Products
+    * Weather Specific Products
+    * Festival Specific Products
+    * Proximity Related Products
+    * Promotional Products
+    * Easy to Carry/Transport Products
+* For our analysis we **optimised for the following metrics** only:
+    * Popular Products
+    * Cross-Selling Products
+    * Branded Products
+    * Differentiated Products
+* Post our analysis, **we would recommend the manager of Store 367 to stock 331 products (out of a toal of 610) in the Grocery Shelf**. The list of 331 recommended products is shown below:
+
+```{r}
+# converting to dataframe
+df <- as.data.frame(final_prods)
+names(df) <- "Products"
+
+# Printing dataframe
+kable(df) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>%
+  scroll_box(width = "50%", height = "500px")
+```
+
+***
+
+#### Future Work
+
+* **Come up with more metrics** that could define what the right set of products could mean for a particular store in a particular location.
+* **Develop algorithms** specific to each of these metrics or a range of metrics.
+* **Write production level codes** that can perform shelf optimisation for multiple stores and categories in **real-time**.
+* Invest resources to collect more **demographic level data for current customers and data related to competitors**.
